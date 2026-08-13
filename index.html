@@ -211,7 +211,8 @@ function BoxMap() {
       .filter((e) => e.lat && e.lon && !seen.has(e.id) && seen.add(e.id))
       .map((e) => ({
         id: e.id, lat: e.lat, lon: e.lon,
-        name: (e.tags && (e.tags.name || e.tags.brand || e.tags.operator)) || "Výdejní box",
+        name: (e.tags && (e.tags.brand || e.tags.name || e.tags.operator)) || "Výdejní box",
+        alzaHint: (e.tags && ((e.tags.brand || "") + " " + (e.tags.name || "") + " " + (e.tags.operator || ""))) || "",
         dist: haversine(origin, { lat: e.lat, lon: e.lon }),
       }))
       .sort((a, b) => a.dist - b.dist);
@@ -223,8 +224,8 @@ function BoxMap() {
     const map = window.L.map(mapDiv.current, { zoomControl: true, attributionControl: true });
     mapObj.current = map;
     window.L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-      { attribution: "&copy; OpenStreetMap &copy; CARTO", subdomains: "abcd", maxZoom: 19 }
+      "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      { attribution: "&copy; OpenStreetMap", maxZoom: 19, className: "dark-tiles" }
     ).addTo(map);
     const circle = window.L.circle([lat, lon], {
       radius: rKm * 1000, color: T.dim, weight: 1, fillColor: T.line, fillOpacity: 0.15,
@@ -263,26 +264,16 @@ function BoxMap() {
       const lat = +geo[0].lat, lon = +geo[0].lon;
       const origin = { lat, lon };
 
-      // 2. AlzaBoxy v okolí (obě tagovací schémata OSM)
+      // 2. Všechny výdejní boxy v okolí jedním dotazem, třídění až u nás
       const around = `(around:${radius * 1000},${lat},${lon})`;
-      const kinds = ['"amenity"="parcel_locker"', '"amenity"="vending_machine"'];
-      const tags = ["brand", "name", "operator"];
-      const parts = [];
-      kinds.forEach((k) =>
-        tags.forEach((t) => parts.push(`node[${k}]["${t}"~"alza",i]${around};`))
-      );
-      const alzaData = await overpass(`[out:json][timeout:25];(${parts.join("")});out body;`);
-      const alza = toPoints(alzaData, origin);
-
-      // 3. Když OSM AlzaBoxy nezná, ukážeme aspoň ostatní výdejní boxy
-      let other = [];
-      if (alza.length === 0) {
-        const qAll = `[out:json][timeout:25];(` +
-          `node["amenity"="parcel_locker"]${around};` +
-          `node["amenity"="vending_machine"]["vending"~"parcel",i]${around};` +
-          `);out body;`;
-        try { other = toPoints(await overpass(qAll), origin); } catch (e) { /* nevadí */ }
-      }
+      const q = `[out:json][timeout:25];(` +
+        `node["amenity"="parcel_locker"]${around};` +
+        `node["amenity"="vending_machine"]["vending"~"parcel",i]${around};` +
+        `);out body;`;
+      const all = toPoints(await overpass(q), origin);
+      const isAlza = (b) => /alza/i.test(b.alzaHint || b.name);
+      const alza = all.filter(isAlza);
+      const other = alza.length ? [] : all;
 
       setBoxes(alza);
       setOthers(other);
@@ -625,6 +616,7 @@ function App() {
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Archivo:wght@400;600;700&display=swap');
         input:focus-visible { outline: 2px solid ${T.amber}; outline-offset: -2px; }
         button:focus-visible { outline: 2px solid ${T.amber}; outline-offset: 2px; }
+        .dark-tiles { filter: invert(1) hue-rotate(190deg) saturate(0.35) brightness(0.9) contrast(0.95); }
         @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
       `}</style>
 
@@ -641,7 +633,7 @@ function App() {
           <span style={{
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: T.dim,
             fontWeight: 400, letterSpacing: "0.1em",
-          }}>v1.2</span>
+          }}>v1.3</span>
         </h1>
         <p style={{ margin: "6px 0 0", fontSize: 12.5, color: T.muted, lineHeight: 1.5 }}>
           Obchodní kalkulátor — spočítejte, kdy se služba vyplatí.
