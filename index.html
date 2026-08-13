@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>AlzaBox kalkulačka</title>
 <meta name="description" content="Obchodní kalkulátor služby Pošli to AlzaBoxem — spočítejte, kdy se služba vyplatí.">
+<link id="leaflet-css" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   html, body { margin: 0; padding: 0; background: #0A0E16; }
 </style>
@@ -16,6 +17,7 @@
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 const { useState, useMemo } = React;
+
 
 
 /* ============================================================
@@ -147,22 +149,34 @@ function BoxMap() {
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [error, setError] = useState("");
   const [boxes, setBoxes] = useState([]);
-  const [center, setCenter] = useState(null);
+  const [others, setOthers] = useState([]);
   const mapDiv = React.useRef(null);
   const mapObj = React.useRef(null);
 
   const loadLeaflet = () =>
     new Promise((resolve, reject) => {
-      if (window.L) return resolve();
-      const css = document.createElement("link");
-      css.rel = "stylesheet";
-      css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
-      document.head.appendChild(css);
-      const s = document.createElement("script");
-      s.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error("Mapovou knihovnu se nepodařilo načíst."));
-      document.head.appendChild(s);
+      if (window.L && document.getElementById("leaflet-css")) return resolve();
+      let cssReady = !!document.getElementById("leaflet-css");
+      let jsReady = !!window.L;
+      const check = () => { if (cssReady && jsReady) resolve(); };
+      if (!cssReady) {
+        const css = document.createElement("link");
+        css.id = "leaflet-css";
+        css.rel = "stylesheet";
+        css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+        css.onload = () => { cssReady = true; check(); };
+        css.onerror = () => { cssReady = true; check(); };
+        document.head.appendChild(css);
+      }
+      if (!jsReady) {
+        const js = document.createElement("script");
+        js.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+        js.onload = () => { jsReady = true; check(); };
+        js.onerror = () => reject(new Error("Mapovou knihovnu se nepodařilo načíst."));
+        document.head.appendChild(js);
+      }
+      check();
+      setTimeout(() => resolve(), 2500); // pojistka, ať se nečeká donekonečna
     });
 
   const haversine = (a, b) => {
@@ -173,7 +187,37 @@ function BoxMap() {
     return 2 * R * Math.asin(Math.sqrt(h));
   };
 
-  const renderMap = (lat, lon, found, rKm) => {
+  const overpass = async (q) => {
+    const mirrors = [
+      "https://overpass-api.de/api/interpreter",
+      "https://overpass.kumi.systems/api/interpreter",
+    ];
+    for (const url of mirrors) {
+      try {
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: "data=" + encodeURIComponent(q),
+        });
+        if (r.ok) return await r.json();
+      } catch (e) { /* zkusíme další server */ }
+    }
+    throw new Error("Server s daty boxů neodpovídá — zkuste to za chvíli.");
+  };
+
+  const toPoints = (data, origin) => {
+    const seen = new Set();
+    return (data.elements || [])
+      .filter((e) => e.lat && e.lon && !seen.has(e.id) && seen.add(e.id))
+      .map((e) => ({
+        id: e.id, lat: e.lat, lon: e.lon,
+        name: (e.tags && (e.tags.name || e.tags.brand || e.tags.operator)) || "Výdejní box",
+        dist: haversine(origin, { lat: e.lat, lon: e.lon }),
+      }))
+      .sort((a, b) => a.dist - b.dist);
+  };
+
+  const renderMap = (lat, lon, alza, other, rKm) => {
     if (!window.L || !mapDiv.current) return;
     if (mapObj.current) { mapObj.current.remove(); mapObj.current = null; }
     const map = window.L.map(mapDiv.current, { zoomControl: true, attributionControl: true });
@@ -185,34 +229,41 @@ function BoxMap() {
     const circle = window.L.circle([lat, lon], {
       radius: rKm * 1000, color: T.dim, weight: 1, fillColor: T.line, fillOpacity: 0.15,
     }).addTo(map);
-    window.L.circleMarker([lat, lon], {
-      radius: 7, color: "#FFFFFF", weight: 2, fillColor: "#FFFFFF", fillOpacity: 0.9,
-    }).addTo(map).bindPopup("Vaše provozovna");
-    found.forEach((b) => {
+    other.forEach((b) => {
+      window.L.circleMarker([b.lat, b.lon], {
+        radius: 5, color: "#5A6B7E", weight: 1.5, fillColor: "#5A6B7E", fillOpacity: 0.6,
+      }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
+    });
+    alza.forEach((b) => {
       window.L.circleMarker([b.lat, b.lon], {
         radius: 6, color: T.amber, weight: 2, fillColor: T.amber, fillOpacity: 0.85,
       }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
     });
+    window.L.circleMarker([lat, lon], {
+      radius: 7, color: "#FFFFFF", weight: 2, fillColor: "#FFFFFF", fillOpacity: 0.9,
+    }).addTo(map).bindPopup("Vaše provozovna");
     map.fitBounds(circle.getBounds(), { padding: [10, 10] });
-    setTimeout(() => { map.invalidateSize(); map.fitBounds(circle.getBounds(), { padding: [10, 10] }); }, 150);
+    // dvojitá pojistka proti prázdným dlaždicím po pozdním načtení CSS
+    setTimeout(() => { map.invalidateSize(); }, 200);
+    setTimeout(() => { map.invalidateSize(); map.fitBounds(circle.getBounds(), { padding: [10, 10] }); }, 800);
   };
 
   const search = async () => {
     if (!addr.trim()) { setError("Zadejte adresu provozovny."); setStatus("error"); return; }
-    setStatus("loading"); setError(""); setBoxes([]);
+    setStatus("loading"); setError(""); setBoxes([]); setOthers([]);
     try {
       await loadLeaflet();
 
-      // 1) Geokódování adresy (Nominatim / OpenStreetMap)
+      // 1. Geokódování adresy (Nominatim / OpenStreetMap)
       const geo = await fetch(
         "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=cz,sk&q=" +
         encodeURIComponent(addr)
       ).then((r) => r.json());
       if (!geo.length) throw new Error("Adresu se nepodařilo najít. Zkuste ji upřesnit (ulice + město).");
       const lat = +geo[0].lat, lon = +geo[0].lon;
-      setCenter({ lat, lon, label: geo[0].display_name.split(",").slice(0, 3).join(",") });
+      const origin = { lat, lon };
 
-      // 2) AlzaBoxy v okolí (OpenStreetMap / Overpass)
+      // 2. AlzaBoxy v okolí (obě tagovací schémata OSM)
       const around = `(around:${radius * 1000},${lat},${lon})`;
       const kinds = ['"amenity"="parcel_locker"', '"amenity"="vending_machine"'];
       const tags = ["brand", "name", "operator"];
@@ -220,46 +271,30 @@ function BoxMap() {
       kinds.forEach((k) =>
         tags.forEach((t) => parts.push(`node[${k}]["${t}"~"alza",i]${around};`))
       );
-      const q = `[out:json][timeout:25];(${parts.join("")});out body;`;
+      const alzaData = await overpass(`[out:json][timeout:25];(${parts.join("")});out body;`);
+      const alza = toPoints(alzaData, origin);
 
-      const mirrors = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
-      ];
-      let data = null;
-      for (const url of mirrors) {
-        try {
-          const r = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: "data=" + encodeURIComponent(q),
-          });
-          if (r.ok) { data = await r.json(); break; }
-        } catch (e) { /* zkusíme další server */ }
+      // 3. Když OSM AlzaBoxy nezná, ukážeme aspoň ostatní výdejní boxy
+      let other = [];
+      if (alza.length === 0) {
+        const qAll = `[out:json][timeout:25];(` +
+          `node["amenity"="parcel_locker"]${around};` +
+          `node["amenity"="vending_machine"]["vending"~"parcel",i]${around};` +
+          `);out body;`;
+        try { other = toPoints(await overpass(qAll), origin); } catch (e) { /* nevadí */ }
       }
-      if (!data) throw new Error("Server s daty boxů neodpovídá — zkuste to za chvíli.");
 
-      const seen = new Set();
-      const found = (data.elements || [])
-        .filter((e) => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
-        .map((e) => ({
-          id: e.id, lat: e.lat, lon: e.lon,
-          name: (e.tags && (e.tags.name || e.tags.brand)) || "AlzaBox",
-          dist: haversine({ lat, lon }, { lat: e.lat, lon: e.lon }),
-        }))
-        .sort((a, b) => a.dist - b.dist);
-
-      setBoxes(found);
+      setBoxes(alza);
+      setOthers(other);
       setStatus("done");
-      setTimeout(() => renderMap(lat, lon, found, radius), 60);
+      setTimeout(() => renderMap(lat, lon, alza, other, radius), 80);
     } catch (err) {
       setStatus("error");
-      setError(
-        (err && err.message ? err.message + " " : "") +
-        "Pokud se data nenačítají v náhledu, může jít o blokování externích požadavků — po nasazení (např. GitHub Pages) funkce běží plně."
-      );
+      setError(err && err.message ? err.message : "Něco se nepovedlo — zkuste to znovu.");
     }
   };
+
+  const listShown = boxes.length ? boxes : others;
 
   return (
     <Section code="F5" title="Mapa AlzaBoxů" defaultOpen={false}>
@@ -311,12 +346,14 @@ function BoxMap() {
 
         {status === "done" && (
           <div style={{
-            fontFamily: "'IBM Plex Mono', monospace", fontSize: 13,
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, lineHeight: 1.6,
             color: boxes.length ? T.green : T.amber,
           }}>
             {boxes.length
               ? `Nalezeno ${boxes.length} AlzaBoxů do ${radius} km`
-              : `V okruhu ${radius} km žádný AlzaBox — zkuste větší okruh`}
+              : others.length
+              ? `OSM zde nemá AlzaBoxy zmapované — šedě zobrazuji ${others.length} výdejních boxů jiných služeb. Reálná síť AlzaBoxů bude hustší (ověřte na alza.cz/alzaboxy).`
+              : `V okruhu ${radius} km není v datech OSM žádný výdejní box — zkuste větší okruh.`}
           </div>
         )}
 
@@ -327,22 +364,22 @@ function BoxMap() {
           }} />
         )}
 
-        {status === "done" && boxes.length > 0 && (
+        {status === "done" && listShown.length > 0 && (
           <div>
             <div style={{
               fontFamily: "'Archivo', sans-serif", fontSize: 10, letterSpacing: "0.1em",
               color: T.muted, textTransform: "uppercase", margin: "4px 0 8px",
-            }}>Nejbližší boxy</div>
-            {boxes.slice(0, 5).map((b) => (
+            }}>{boxes.length ? "Nejbližší AlzaBoxy" : "Nejbližší výdejní boxy (jiné služby)"}</div>
+            {listShown.slice(0, 5).map((b) => (
               <div key={b.id} style={{
                 display: "flex", justifyContent: "space-between", gap: 10,
                 padding: "7px 0", borderBottom: `1px solid ${T.line}`,
-                fontSize: 12, color: T.text,
+                fontSize: 12, color: boxes.length ? T.text : T.muted,
               }}>
                 <span style={{ overflowWrap: "anywhere" }}>{b.name}</span>
                 <span style={{
-                  fontFamily: "'IBM Plex Mono', monospace", color: T.amber,
-                  whiteSpace: "nowrap",
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  color: boxes.length ? T.amber : T.muted, whiteSpace: "nowrap",
                 }}>{b.dist.toFixed(2).replace(".", ",")} km</span>
               </div>
             ))}
@@ -598,8 +635,13 @@ function App() {
       }}>
         <h1 style={{
           margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: "0.02em",
+          display: "flex", alignItems: "baseline", justifyContent: "space-between",
         }}>
-          ALZABOX <span style={{ color: T.amber }}>KALKULAČKA</span>
+          <span>ALZABOX <span style={{ color: T.amber }}>KALKULAČKA</span></span>
+          <span style={{
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: T.dim,
+            fontWeight: 400, letterSpacing: "0.1em",
+          }}>v1.2</span>
         </h1>
         <p style={{ margin: "6px 0 0", fontSize: 12.5, color: T.muted, lineHeight: 1.5 }}>
           Obchodní kalkulátor — spočítejte, kdy se služba vyplatí.
@@ -611,6 +653,22 @@ function App() {
         {/* ===== F1 VSTUPY ===== */}
         <Section code="F1" title="Čísla vašeho e-shopu">
           <div style={{ display: "grid", gap: 16 }}>
+            <label style={{ display: "block" }}>
+              <div style={{
+                fontFamily: "'Archivo', sans-serif", fontSize: 11, letterSpacing: "0.08em",
+                color: T.muted, textTransform: "uppercase", marginBottom: 6,
+              }}>Klient / e-shop (volitelné)</div>
+              <input
+                type="text" value={clientName}
+                onChange={(e) => setClientName(e.target.value)}
+                placeholder="např. TrendyMóda s.r.o."
+                style={{
+                  width: "100%", boxSizing: "border-box", background: T.panelSoft,
+                  border: `1px solid ${T.line}`, borderRadius: 4, padding: "11px 12px",
+                  color: T.text, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace",
+                }}
+              />
+            </label>
             <Field label="Objednávky měsíčně" unit="ks" value={orders} onChange={setOrders} />
             <Field label="Průměrná objednávka (AOV)" unit="Kč" value={aov} onChange={setAov} />
             <div>
