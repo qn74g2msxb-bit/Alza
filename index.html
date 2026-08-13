@@ -150,6 +150,7 @@ function BoxMap() {
   const [error, setError] = useState("");
   const [boxes, setBoxes] = useState([]);
   const [others, setOthers] = useState([]);
+  const [mapDead, setMapDead] = useState(false);
   const mapDiv = React.useRef(null);
   const mapObj = React.useRef(null);
 
@@ -218,40 +219,61 @@ function BoxMap() {
       .sort((a, b) => a.dist - b.dist);
   };
 
+  const zoomFor = (rKm) => (rKm <= 1 ? 15 : rKm <= 3 ? 14 : rKm <= 5 ? 13 : 12);
+
   const renderMap = (lat, lon, alza, other, rKm) => {
-    if (!window.L || !mapDiv.current) return;
-    if (mapObj.current) { mapObj.current.remove(); mapObj.current = null; }
-    const map = window.L.map(mapDiv.current, { zoomControl: true, attributionControl: true });
-    mapObj.current = map;
-    window.L.tileLayer(
-      "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-      { attribution: "&copy; OpenStreetMap", maxZoom: 19, className: "dark-tiles" }
-    ).addTo(map);
-    const circle = window.L.circle([lat, lon], {
-      radius: rKm * 1000, color: T.dim, weight: 1, fillColor: T.line, fillOpacity: 0.15,
-    }).addTo(map);
-    other.forEach((b) => {
-      window.L.circleMarker([b.lat, b.lon], {
-        radius: 5, color: "#5A6B7E", weight: 1.5, fillColor: "#5A6B7E", fillOpacity: 0.6,
-      }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
-    });
-    alza.forEach((b) => {
-      window.L.circleMarker([b.lat, b.lon], {
-        radius: 6, color: T.amber, weight: 2, fillColor: T.amber, fillOpacity: 0.85,
-      }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
-    });
-    window.L.circleMarker([lat, lon], {
-      radius: 7, color: "#FFFFFF", weight: 2, fillColor: "#FFFFFF", fillOpacity: 0.9,
-    }).addTo(map).bindPopup("Vaše provozovna");
-    map.fitBounds(circle.getBounds(), { padding: [10, 10] });
-    // dvojitá pojistka proti prázdným dlaždicím po pozdním načtení CSS
-    setTimeout(() => { map.invalidateSize(); }, 200);
-    setTimeout(() => { map.invalidateSize(); map.fitBounds(circle.getBounds(), { padding: [10, 10] }); }, 800);
+    if (!window.L || !mapDiv.current) { setMapDead(true); return; }
+    try {
+      if (mapObj.current) { mapObj.current.remove(); mapObj.current = null; }
+      const map = window.L.map(mapDiv.current, {
+        center: [lat, lon], zoom: zoomFor(rKm),
+        zoomControl: true, attributionControl: true,
+      });
+      mapObj.current = map;
+
+      let tilesOk = false;
+      const tiles = window.L.tileLayer(
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        { attribution: "&copy; OpenStreetMap", maxZoom: 19, className: "dark-tiles" }
+      );
+      tiles.on("tileload", () => { tilesOk = true; });
+      tiles.addTo(map);
+
+      window.L.circle([lat, lon], {
+        radius: rKm * 1000, color: T.dim, weight: 1, fillColor: T.line, fillOpacity: 0.15,
+      }).addTo(map);
+      other.forEach((b) => {
+        window.L.circleMarker([b.lat, b.lon], {
+          radius: 5, color: "#5A6B7E", weight: 1.5, fillColor: "#5A6B7E", fillOpacity: 0.6,
+        }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
+      });
+      alza.forEach((b) => {
+        window.L.circleMarker([b.lat, b.lon], {
+          radius: 6, color: T.amber, weight: 2, fillColor: T.amber, fillOpacity: 0.85,
+        }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
+      });
+      window.L.circleMarker([lat, lon], {
+        radius: 7, color: "#FFFFFF", weight: 2, fillColor: "#FFFFFF", fillOpacity: 0.9,
+      }).addTo(map).bindPopup("Vaše provozovna");
+
+      setTimeout(() => { try { map.invalidateSize(); } catch (e) {} }, 250);
+
+      // hlídač: když se dlaždice do 4 s nevykreslí, mapu poklidně odstraníme
+      setTimeout(() => {
+        if (!tilesOk) {
+          try { map.remove(); } catch (e) {}
+          mapObj.current = null;
+          setMapDead(true);
+        }
+      }, 4000);
+    } catch (e) {
+      setMapDead(true);
+    }
   };
 
   const search = async () => {
     if (!addr.trim()) { setError("Zadejte adresu provozovny."); setStatus("error"); return; }
-    setStatus("loading"); setError(""); setBoxes([]); setOthers([]);
+    setStatus("loading"); setError(""); setBoxes([]); setOthers([]); setMapDead(false);
     try {
       await loadLeaflet();
 
@@ -348,11 +370,18 @@ function BoxMap() {
           </div>
         )}
 
-        {status === "done" && (
+        {status === "done" && !mapDead && (
           <div ref={mapDiv} style={{
             height: 320, borderRadius: 4, border: `1px solid ${T.line}`,
             overflow: "hidden", background: T.panelSoft,
           }} />
+        )}
+
+        {status === "done" && mapDead && (
+          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: T.dim }}>
+            Mapové podklady se v tomto prohlížeči nenačetly — vzdálenosti k boxům jsou
+            v seznamu níže.
+          </p>
         )}
 
         {status === "done" && listShown.length > 0 && (
@@ -633,7 +662,7 @@ function App() {
           <span style={{
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: T.dim,
             fontWeight: 400, letterSpacing: "0.1em",
-          }}>v1.3</span>
+          }}>v1.4</span>
         </h1>
         <p style={{ margin: "6px 0 0", fontSize: 12.5, color: T.muted, lineHeight: 1.5 }}>
           Obchodní kalkulátor — spočítejte, kdy se služba vyplatí.
