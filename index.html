@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>AlzaBox kalkulačka</title>
+<meta name="description" content="Obchodní kalkulátor služby Pošli to AlzaBoxem — spočítejte, kdy se služba vyplatí.">
+<style>
+  html, body { margin: 0; padding: 0; background: #0A0E16; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+
+
+
+/* ============================================================
+   POŠLI TO ALZABOXEM — OBCHODNÍ KALKULÁTOR
+   ============================================================ */
+
+const T = {
+  bg: "#0A0E16",
+  panel: "#111826",
+  panelSoft: "#0E141F",
+  line: "#1E2A3C",
+  amber: "#FFB020",
+  green: "#33D17A",
+  red: "#FF5C5C",
+  muted: "#7C8CA6",
+  text: "#E6EDF7",
+  dim: "#43506B",
+};
+
+const fmt = (n) =>
+  new Intl.NumberFormat("cs-CZ", { maximumFractionDigits: 0 }).format(Math.round(n));
+const fmtKc = (n) => `${fmt(n)} Kč`;
+const fmtPct = (n) =>
+  new Intl.NumberFormat("cs-CZ", { maximumFractionDigits: 2 }).format(n) + " %";
+
+const SCENARIOS = [
+  { id: "pes", label: "PESIMISTICKÝ", uplift: 0 },
+  { id: "zak", label: "ZÁKLADNÍ", uplift: 1.2 },
+  { id: "opt", label: "OPTIMISTICKÝ", uplift: 2.5 },
+];
+
+function Field({ label, unit, value, onChange, max }) {
+  const [raw, setRaw] = useState(null);
+
+  const commit = (txt) => {
+    let num = parseFloat(String(txt).replace(",", "."));
+    if (!isNaN(num)) {
+      if (num < 0) num = 0;
+      if (max !== undefined && num > max) num = max;
+      onChange(num);
+    }
+    setRaw(null);
+  };
+
+  return (
+    <label style={{ display: "block" }}>
+      <div style={{
+        fontFamily: "'Archivo', sans-serif", fontSize: 11, letterSpacing: "0.08em",
+        color: T.muted, textTransform: "uppercase", marginBottom: 6,
+      }}>{label}</div>
+      <div style={{
+        display: "flex", alignItems: "center",
+        background: T.panelSoft, border: `1px solid ${T.line}`, borderRadius: 4,
+      }}>
+        <input
+          type="text" inputMode="decimal"
+          value={raw !== null ? raw : String(value).replace(".", ",")}
+          onChange={(e) => setRaw(e.target.value)}
+          onBlur={(e) => commit(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+          style={{
+            flex: 1, minWidth: 0, background: "transparent", border: "none",
+            padding: "11px 12px", color: T.amber, fontSize: 16,
+            fontFamily: "'IBM Plex Mono', monospace", fontVariantNumeric: "tabular-nums",
+          }}
+        />
+        <span style={{
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: T.dim,
+          padding: "0 12px", whiteSpace: "nowrap",
+        }}>{unit}</span>
+      </div>
+    </label>
+  );
+}
+
+function Stat({ label, value, tone }) {
+  const color = tone === "pos" ? T.green : tone === "neg" ? T.red : T.text;
+  return (
+    <div style={{
+      background: T.panelSoft, border: `1px solid ${T.line}`, borderRadius: 4,
+      padding: "12px 14px",
+    }}>
+      <div style={{
+        fontFamily: "'Archivo', sans-serif", fontSize: 10, letterSpacing: "0.1em",
+        color: T.muted, textTransform: "uppercase", marginBottom: 6,
+      }}>{label}</div>
+      <div style={{
+        fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, color,
+        fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere",
+      }}>{value}</div>
+    </div>
+  );
+}
+
+function Section({ code, title, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section style={{
+      background: T.panel, border: `1px solid ${T.line}`, borderRadius: 6,
+      marginBottom: 14, overflow: "hidden",
+    }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: 10,
+          background: "transparent", border: "none", cursor: "pointer",
+          padding: "12px 16px", textAlign: "left",
+        }}
+      >
+        <span style={{
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: T.amber,
+        }}>{code}</span>
+        <span style={{
+          fontFamily: "'Archivo', sans-serif", fontWeight: 600, fontSize: 13,
+          letterSpacing: "0.12em", color: T.text, textTransform: "uppercase", flex: 1,
+        }}>{title}</span>
+        <span style={{ color: T.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>
+          {open ? "−" : "+"}
+        </span>
+      </button>
+      {open && <div style={{ padding: "4px 16px 16px" }}>{children}</div>}
+    </section>
+  );
+}
+
+function BoxMap() {
+  const [addr, setAddr] = useState("");
+  const [radius, setRadius] = useState(3);
+  const [status, setStatus] = useState("idle"); // idle | loading | done | error
+  const [error, setError] = useState("");
+  const [boxes, setBoxes] = useState([]);
+  const [center, setCenter] = useState(null);
+  const mapDiv = React.useRef(null);
+  const mapObj = React.useRef(null);
+
+  const loadLeaflet = () =>
+    new Promise((resolve, reject) => {
+      if (window.L) return resolve();
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+      document.head.appendChild(css);
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("Mapovou knihovnu se nepodařilo načíst."));
+      document.head.appendChild(s);
+    });
+
+  const haversine = (a, b) => {
+    const R = 6371, rad = (d) => (d * Math.PI) / 180;
+    const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+    const h = Math.sin(dLat / 2) ** 2 +
+      Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  };
+
+  const renderMap = (lat, lon, found, rKm) => {
+    if (!window.L || !mapDiv.current) return;
+    if (mapObj.current) { mapObj.current.remove(); mapObj.current = null; }
+    const map = window.L.map(mapDiv.current, { zoomControl: true, attributionControl: true });
+    mapObj.current = map;
+    window.L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      { attribution: "&copy; OpenStreetMap &copy; CARTO", maxZoom: 19 }
+    ).addTo(map);
+    const circle = window.L.circle([lat, lon], {
+      radius: rKm * 1000, color: T.dim, weight: 1, fillColor: T.line, fillOpacity: 0.15,
+    }).addTo(map);
+    window.L.circleMarker([lat, lon], {
+      radius: 7, color: "#FFFFFF", weight: 2, fillColor: "#FFFFFF", fillOpacity: 0.9,
+    }).addTo(map).bindPopup("Vaše provozovna");
+    found.forEach((b) => {
+      window.L.circleMarker([b.lat, b.lon], {
+        radius: 6, color: T.amber, weight: 2, fillColor: T.amber, fillOpacity: 0.85,
+      }).addTo(map).bindPopup(`${b.name}<br>${b.dist.toFixed(2).replace(".", ",")} km`);
+    });
+    map.fitBounds(circle.getBounds(), { padding: [10, 10] });
+  };
+
+  const search = async () => {
+    if (!addr.trim()) { setError("Zadejte adresu provozovny."); setStatus("error"); return; }
+    setStatus("loading"); setError(""); setBoxes([]);
+    try {
+      await loadLeaflet();
+
+      // 1) Geokódování adresy (Nominatim / OpenStreetMap)
+      const geo = await fetch(
+        "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=cz,sk&q=" +
+        encodeURIComponent(addr)
+      ).then((r) => r.json());
+      if (!geo.length) throw new Error("Adresu se nepodařilo najít. Zkuste ji upřesnit (ulice + město).");
+      const lat = +geo[0].lat, lon = +geo[0].lon;
+      setCenter({ lat, lon, label: geo[0].display_name.split(",").slice(0, 3).join(",") });
+
+      // 2) AlzaBoxy v okolí (OpenStreetMap / Overpass)
+      const around = `(around:${radius * 1000},${lat},${lon})`;
+      const q = `[out:json][timeout:25];(` +
+        `node["amenity"="parcel_locker"]["brand"~"alza",i]${around};` +
+        `node["amenity"="parcel_locker"]["name"~"alza",i]${around};` +
+        `node["amenity"="parcel_locker"]["operator"~"alza",i]${around};` +
+        `);out body;`;
+      const data = await fetch("https://overpass-api.de/api/interpreter", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "data=" + encodeURIComponent(q),
+      }).then((r) => r.json());
+
+      const seen = new Set();
+      const found = (data.elements || [])
+        .filter((e) => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
+        .map((e) => ({
+          id: e.id, lat: e.lat, lon: e.lon,
+          name: (e.tags && (e.tags.name || e.tags.brand)) || "AlzaBox",
+          dist: haversine({ lat, lon }, { lat: e.lat, lon: e.lon }),
+        }))
+        .sort((a, b) => a.dist - b.dist);
+
+      setBoxes(found);
+      setStatus("done");
+      setTimeout(() => renderMap(lat, lon, found, radius), 60);
+    } catch (err) {
+      setStatus("error");
+      setError(
+        (err && err.message ? err.message + " " : "") +
+        "Pokud se data nenačítají v náhledu, může jít o blokování externích požadavků — po nasazení (např. GitHub Pages) funkce běží plně."
+      );
+    }
+  };
+
+  return (
+    <Section code="F5" title="Mapa AlzaBoxů" defaultOpen={false}>
+      <div style={{ display: "grid", gap: 12 }}>
+        <label style={{ display: "block" }}>
+          <div style={{
+            fontFamily: "'Archivo', sans-serif", fontSize: 11, letterSpacing: "0.08em",
+            color: T.muted, textTransform: "uppercase", marginBottom: 6,
+          }}>Adresa</div>
+          <input
+            type="text" value={addr}
+            onChange={(e) => setAddr(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") search(); }}
+            placeholder="např. Jankovcova 1522/53, Praha 7"
+            style={{
+              width: "100%", boxSizing: "border-box", background: T.panelSoft,
+              border: `1px solid ${T.line}`, borderRadius: 4, padding: "11px 12px",
+              color: T.text, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace",
+            }}
+          />
+        </label>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          {[1, 3, 5, 10].map((r) => (
+            <button key={r} onClick={() => setRadius(r)}
+              style={{
+                flex: 1, padding: "8px 4px", borderRadius: 4, cursor: "pointer",
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
+                background: radius === r ? "#1A2334" : "transparent",
+                border: `1px solid ${radius === r ? T.amber : T.line}`,
+                color: radius === r ? T.amber : T.muted,
+              }}>{r} km</button>
+          ))}
+        </div>
+
+        <button onClick={search} disabled={status === "loading"}
+          style={{
+            padding: "12px", borderRadius: 4, cursor: "pointer", border: "none",
+            background: T.amber, color: "#0A0E16", fontFamily: "'Archivo', sans-serif",
+            fontWeight: 700, fontSize: 13, letterSpacing: "0.08em",
+            opacity: status === "loading" ? 0.6 : 1,
+          }}>
+          {status === "loading" ? "HLEDÁM…" : "NAJÍT BOXY V OKOLÍ"}
+        </button>
+
+        {status === "error" && (
+          <p style={{ margin: 0, fontSize: 12, lineHeight: 1.6, color: T.red }}>{error}</p>
+        )}
+
+        {status === "done" && (
+          <div style={{
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 13,
+            color: boxes.length ? T.green : T.amber,
+          }}>
+            {boxes.length
+              ? `Nalezeno ${boxes.length} AlzaBoxů do ${radius} km`
+              : `V okruhu ${radius} km žádný AlzaBox — zkuste větší okruh`}
+          </div>
+        )}
+
+        {status === "done" && (
+          <div ref={mapDiv} style={{
+            height: 320, borderRadius: 4, border: `1px solid ${T.line}`,
+            overflow: "hidden", background: T.panelSoft,
+          }} />
+        )}
+
+        {status === "done" && boxes.length > 0 && (
+          <div>
+            <div style={{
+              fontFamily: "'Archivo', sans-serif", fontSize: 10, letterSpacing: "0.1em",
+              color: T.muted, textTransform: "uppercase", margin: "4px 0 8px",
+            }}>Nejbližší boxy</div>
+            {boxes.slice(0, 5).map((b) => (
+              <div key={b.id} style={{
+                display: "flex", justifyContent: "space-between", gap: 10,
+                padding: "7px 0", borderBottom: `1px solid ${T.line}`,
+                fontSize: 12, color: T.text,
+              }}>
+                <span style={{ overflowWrap: "anywhere" }}>{b.name}</span>
+                <span style={{
+                  fontFamily: "'IBM Plex Mono', monospace", color: T.amber,
+                  whiteSpace: "nowrap",
+                }}>{b.dist.toFixed(2).replace(".", ",")} km</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <p style={{ margin: 0, fontSize: 10.5, lineHeight: 1.5, color: T.dim }}>
+          Zdroj poloh boxů: OpenStreetMap (komunitní data) — počet nalezených boxů je
+          orientační minimum, reálná síť může být hustší. Pro jednání slouží jako rychlý
+          důkaz dostupnosti přímo na mapě.
+        </p>
+      </div>
+    </Section>
+  );
+}
+
+function SummarySheet({ inputs, calc, clientName, setClientName, onClose }) {
+  const tone = calc.verdict.startsWith("ANO") ? "#1E9E5A"
+    : calc.verdict === "HRANIČNÍ" ? "#C77E00" : "#D64545";
+  const today = new Date().toLocaleDateString("cs-CZ");
+
+  const nextStep = calc.verdict.startsWith("ANO")
+    ? "Doporučujeme domluvit konkrétní podmínky zapojení a termín spuštění. Kalkulace ukazuje přínos i při konzervativních předpokladech."
+    : calc.verdict === "HRANIČNÍ"
+    ? "Doporučujeme tříměsíční pilotní provoz s měřením skutečného podílu zásilek do boxů a vlivu na konverzi. Po pilotu kalkulaci zopakujeme s reálnými čísly."
+    : "Při současných číslech zapojení nedoporučujeme. Kalkulaci má smysl zopakovat, pokud se změní podíl zásilek do boxů, cena za zásilku nebo struktura marže.";
+
+  const inputRows = [
+    ["Objednávky měsíčně", `${fmt(inputs.orders)} ks`],
+    ["Průměrná objednávka (AOV)", fmtKc(inputs.aov)],
+    inputs.margin > 100
+      ? ["Hrubá marže (přepočet z přirážky)", `${fmtPct((inputs.margin / (100 + inputs.margin)) * 100)} (přirážka ${fmtPct(inputs.margin)})`]
+      : ["Hrubá marže", fmtPct(inputs.margin)],
+    ["Současný náklad na zásilku", fmtKc(inputs.cNow)],
+    ["Podíl objednávek do AlzaBoxu", fmtPct(inputs.share)],
+    ["Cena za zásilku do AlzaBoxu", fmtKc(inputs.cAbx)],
+    ["Uvažovaný růst konverze", fmtPct(inputs.uplift)],
+  ];
+
+  const resultRows = [
+    ["Úspora na zpracování zásilek", `${fmtKc(calc.costEffect)} / měs.`],
+    ["Marže z nových objednávek", `${fmtKc(calc.revEffect)} / měs.`],
+    ["Celkový dopad měsíčně", fmtKc(calc.monthly)],
+    ["Celkový dopad ročně", fmtKc(calc.yearly)],
+    ["Break-even růst konverze", isFinite(calc.breakEvenUplift) ? fmtPct(calc.breakEvenUplift) : "—"],
+  ];
+
+  const th = {
+    textAlign: "left", padding: "7px 0", fontSize: 12, color: "#5A6B7E",
+    borderBottom: "1px solid #E4E9EF", fontWeight: 400,
+  };
+  const td = {
+    textAlign: "right", padding: "7px 0", fontSize: 12.5, color: "#15202B",
+    borderBottom: "1px solid #E4E9EF",
+    fontFamily: "'IBM Plex Mono', monospace", fontVariantNumeric: "tabular-nums",
+  };
+  const h2 = {
+    fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase",
+    color: "#5A6B7E", margin: "22px 0 6px", fontWeight: 600,
+  };
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#EEF1F5", padding: "20px 12px 40px",
+      fontFamily: "'Archivo', sans-serif", color: "#15202B",
+    }}>
+      <style>{`
+        @media print {
+          .no-print { display: none !important; }
+          body { background: #fff !important; }
+          .sheet { border: none !important; border-radius: 0 !important; box-shadow: none !important; }
+        }
+      `}</style>
+
+      <div className="no-print" style={{
+        display: "flex", gap: 8, maxWidth: 640, margin: "0 auto 14px",
+      }}>
+        <button onClick={() => window.print()} style={{
+          flex: 1, padding: "12px", borderRadius: 4, cursor: "pointer", border: "none",
+          background: "#15202B", color: "#fff", fontWeight: 700, fontSize: 12,
+          letterSpacing: "0.08em", fontFamily: "'Archivo', sans-serif",
+        }}>VYTISKNOUT / ULOŽIT PDF</button>
+        <button onClick={onClose} style={{
+          flex: 1, padding: "12px", borderRadius: 4, cursor: "pointer",
+          background: "transparent", border: "1px solid #B8C2CE", color: "#15202B",
+          fontWeight: 700, fontSize: 12, letterSpacing: "0.08em",
+          fontFamily: "'Archivo', sans-serif",
+        }}>ZPĚT DO KALKULÁTORU</button>
+      </div>
+
+      <div className="sheet" style={{
+        maxWidth: 640, margin: "0 auto", background: "#fff",
+        border: "1px solid #DDE3EA", borderRadius: 6, padding: "28px 26px",
+      }}>
+        <div style={{
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#8A97A6",
+          letterSpacing: "0.15em", marginBottom: 6,
+        }}>ALZABOX KALKULAČKA · SHRNUTÍ · {today}</div>
+
+        <input
+          type="text" value={clientName}
+          onChange={(e) => setClientName(e.target.value)}
+          placeholder="Název klienta / e-shopu"
+          style={{
+            width: "100%", boxSizing: "border-box", border: "none",
+            borderBottom: "1px solid #DDE3EA", padding: "4px 0 8px",
+            fontSize: 19, fontWeight: 700, color: "#15202B", background: "transparent",
+            fontFamily: "'Archivo', sans-serif",
+          }}
+        />
+
+        <div style={{
+          marginTop: 18, border: `1px solid ${tone}`, borderRadius: 4,
+          padding: "12px 14px", background: "#FAFBFC",
+        }}>
+          <div style={{
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: tone,
+            letterSpacing: "0.05em", marginBottom: 6,
+          }}>VERDIKT: {calc.verdict}</div>
+          <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>{calc.verdictLine}</div>
+        </div>
+
+        <div style={h2}>Vstupní údaje</div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody>
+          {inputRows.map(([k, v]) => (
+            <tr key={k}><td style={th}>{k}</td><td style={td}>{v}</td></tr>
+          ))}
+        </tbody></table>
+
+        <div style={h2}>Výsledek kalkulace</div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody>
+          {resultRows.map(([k, v]) => (
+            <tr key={k}><td style={th}>{k}</td><td style={td}>{v}</td></tr>
+          ))}
+        </tbody></table>
+
+        <div style={h2}>Doporučený další krok</div>
+        <p style={{ fontSize: 12.5, lineHeight: 1.65, margin: "4px 0 0" }}>{nextStep}</p>
+
+        <p style={{
+          fontSize: 10, lineHeight: 1.5, color: "#8A97A6", margin: "24px 0 0",
+          borderTop: "1px solid #E4E9EF", paddingTop: 10,
+        }}>
+          Kalkulace vychází z údajů poskytnutých klientem a z nastavitelných předpokladů
+          (cena za zásilku, úspora na zpracování). Nezahrnuje sekundární efekty jako nižší
+          podíl nedoručených zásilek — výsledek je proto konzervativní.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [orders, setOrders] = useState(4000);
+  const [aov, setAov] = useState(1250);
+  const [margin, setMargin] = useState(48);
+  const [cNow, setCNow] = useState(95);
+  const [share, setShare] = useState(45);
+  const [cAbx, setCAbx] = useState(69);
+  const [procSave, setProcSave] = useState(6);
+  const [uplift, setUplift] = useState(1.2);
+  const [activeScenario, setActiveScenario] = useState("zak");
+  const [showSummary, setShowSummary] = useState(false);
+  const [clientName, setClientName] = useState("");
+
+  const calc = useMemo(() => {
+    // Marže vs. přirážka: hodnoty nad 100 % chápeme jako přirážku a převedeme
+    const m = margin > 100 ? margin / (100 + margin) : margin / 100;
+    const s = share / 100;
+    const u = uplift / 100;
+
+    // Nákladová strana: úspora na zásilkách přesměrovaných do AlzaBoxu
+    const savePerPkg = cNow - cAbx + procSave;
+    const costEffect = orders * s * savePerPkg; // Kč / měsíc
+
+    // Výnosová strana: dodatečné objednávky × příspěvková marže
+    const contribPerOrder = aov * m;
+    const revEffect = orders * u * contribPerOrder;
+
+    const monthly = costEffect + revEffect;
+    const yearly = monthly * 12;
+
+    // Break-even: jaký růst konverze pokryje případnou ztrátu z nákladové strany
+    const breakEvenUplift =
+      contribPerOrder <= 0 || orders <= 0
+        ? Infinity
+        : costEffect >= 0 ? 0 : (-costEffect / (orders * contribPerOrder)) * 100;
+
+    let verdict, verdictColor, verdictLine;
+    if (costEffect >= 0 && orders > 0) {
+      verdict = "ANO — VYPLATÍ SE";
+      verdictColor = T.green;
+      verdictLine = `Úspora na zpracování zásilek (${fmtKc(costEffect)}/měs.) pokryje službu i při nulovém růstu prodejů. Jakýkoli růst konverze je čistý zisk navíc.`;
+    } else if (breakEvenUplift <= 1) {
+      verdict = "ANO — VYPLATÍ SE";
+      verdictColor = T.green;
+      verdictLine = `Stačí, aby rychlejší doručení zvedlo konverzi o ${fmtPct(breakEvenUplift)} — a služba je v plusu.`;
+    } else if (breakEvenUplift <= 2.5) {
+      verdict = "HRANIČNÍ";
+      verdictColor = T.amber;
+      verdictLine = `Break-even vyžaduje růst konverze o ${fmtPct(breakEvenUplift)}. Dosažitelné, ale ne jisté. Doporučení: pilotní provoz 3 měsíce a měřit.`;
+    } else {
+      verdict = "ZATÍM NE";
+      verdictColor = T.red;
+      verdictLine = isFinite(breakEvenUplift)
+        ? `Při vašich číslech by konverze musela vzrůst o ${fmtPct(breakEvenUplift)}, což je nerealistické. Co by to změnilo: vyšší podíl zásilek do boxů, nižší cena za zásilku, nebo vyšší marže sortimentu.`
+        : `Zadejte kladné objednávky, AOV a marži — bez nich nelze návratnost spočítat.`;
+    }
+
+    // Citlivostní analýza
+    const sensitivity = [0, 0.5, 1, 1.5, 2.5, 4].map((up) => ({
+      uplift: up,
+      monthly: costEffect + orders * (up / 100) * contribPerOrder,
+    }));
+
+    return {
+      savePerPkg, costEffect, revEffect, monthly, yearly,
+      breakEvenUplift, verdict, verdictColor, verdictLine,
+      sensitivity, extraOrders: orders * u,
+    };
+  }, [orders, aov, margin, cNow, share, cAbx, procSave, uplift]);
+
+  const maxAbs = Math.max(...calc.sensitivity.map((s) => Math.abs(s.monthly)), 1);
+
+  if (showSummary) {
+    return (
+      <SummarySheet
+        inputs={{ orders, aov, margin, cNow, share, cAbx, uplift }}
+        calc={calc}
+        clientName={clientName}
+        setClientName={setClientName}
+        onClose={() => setShowSummary(false)}
+      />
+    );
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: T.bg, color: T.text,
+      fontFamily: "'Archivo', sans-serif", padding: "0 0 40px",
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Archivo:wght@400;600;700&display=swap');
+        input:focus-visible { outline: 2px solid ${T.amber}; outline-offset: -2px; }
+        button:focus-visible { outline: 2px solid ${T.amber}; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+      `}</style>
+
+      {/* ===== HLAVIČKA ===== */}
+      <header style={{
+        borderBottom: `1px solid ${T.line}`, padding: "18px 16px 14px",
+        background: T.panelSoft,
+      }}>
+        <h1 style={{
+          margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: "0.02em",
+        }}>
+          ALZABOX <span style={{ color: T.amber }}>KALKULAČKA</span>
+        </h1>
+        <p style={{ margin: "6px 0 0", fontSize: 12.5, color: T.muted, lineHeight: 1.5 }}>
+          Obchodní kalkulátor — spočítejte, kdy se služba vyplatí.
+        </p>
+      </header>
+
+      <main style={{ maxWidth: 680, margin: "0 auto", padding: "16px 12px 0" }}>
+
+        {/* ===== F1 VSTUPY ===== */}
+        <Section code="F1" title="Čísla vašeho e-shopu">
+          <div style={{ display: "grid", gap: 16 }}>
+            <Field label="Objednávky měsíčně" unit="ks" value={orders} onChange={setOrders} />
+            <Field label="Průměrná objednávka (AOV)" unit="Kč" value={aov} onChange={setAov} />
+            <div>
+              <Field label="Hrubá marže" unit="%" value={margin} onChange={setMargin} />
+              {margin > 100 && (
+                <p style={{
+                  margin: "6px 0 0", fontSize: 11, lineHeight: 1.5, color: T.amber,
+                }}>
+                  Hodnota nad 100 % — počítám s ní jako s obchodní přirážkou:
+                  přirážka {fmtPct(margin)} = marže {fmtPct((margin / (100 + margin)) * 100)}.
+                </p>
+              )}
+            </div>
+            <Field label="Současný náklad na zásilku (doprava + balení)" unit="Kč" value={cNow} onChange={setCNow} />
+            <Field label="Podíl objednávek do AlzaBoxu" unit="%" value={share} onChange={setShare} max={100} />
+          </div>
+        </Section>
+
+        {/* ===== F2 SCÉNÁŘE ===== */}
+        <Section code="F2" title="Scénář růstu konverze">
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            {SCENARIOS.map((s) => (
+              <button key={s.id}
+                onClick={() => { setActiveScenario(s.id); setUplift(s.uplift); }}
+                style={{
+                  flex: 1, padding: "9px 4px", borderRadius: 4, cursor: "pointer",
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+                  background: activeScenario === s.id ? "#1A2334" : "transparent",
+                  border: `1px solid ${activeScenario === s.id ? T.amber : T.line}`,
+                  color: activeScenario === s.id ? T.amber : T.muted,
+                }}>
+                {s.label}<br />
+                <span style={{ fontSize: 13 }}>+{s.uplift} %</span>
+              </button>
+            ))}
+          </div>
+          <Field label="Vlastní odhad růstu konverze" unit="%" value={uplift} max={100}
+            onChange={(v) => { setUplift(v); setActiveScenario(null); }} />
+        </Section>
+
+        {/* ===== VERDIKT ===== */}
+        <div style={{
+          border: `1px solid ${calc.verdictColor}`, borderRadius: 6,
+          background: T.panelSoft, padding: "16px 16px 14px", marginBottom: 14,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
+          }}>
+            <span style={{
+              width: 9, height: 9, borderRadius: "50%", background: calc.verdictColor,
+              display: "inline-block",
+            }} />
+            <span style={{
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 15,
+              color: calc.verdictColor, letterSpacing: "0.05em",
+            }}>
+              VERDIKT: {calc.verdict}
+            </span>
+          </div>
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: T.text }}>
+            {calc.verdictLine}
+          </p>
+        </div>
+
+        {/* ===== F3 VÝSLEDKY ===== */}
+        <Section code="F3" title="Dopad na hospodaření">
+          <div style={{
+            display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10,
+          }}>
+            <Stat label="Úspora na zásilkách / měs."
+              value={fmtKc(calc.costEffect)}
+              tone={calc.costEffect >= 0 ? "pos" : "neg"} />
+            <Stat label="Marže z nových objednávek / měs."
+              value={fmtKc(calc.revEffect)} tone="pos" />
+            <Stat label="Celkem měsíčně"
+              value={fmtKc(calc.monthly)}
+              tone={calc.monthly >= 0 ? "pos" : "neg"} />
+            <Stat label="Celkem ročně"
+              value={fmtKc(calc.yearly)}
+              tone={calc.yearly >= 0 ? "pos" : "neg"} />
+            <Stat label="Break-even růst konverze"
+              value={isFinite(calc.breakEvenUplift) ? fmtPct(calc.breakEvenUplift) : "—"} />
+            <Stat label="Nové objednávky / měs."
+              value={`+${fmt(calc.extraOrders)} ks`} />
+          </div>
+
+          {/* Citlivostní analýza */}
+          <div style={{ marginTop: 18 }}>
+            <div style={{
+              fontFamily: "'Archivo', sans-serif", fontSize: 10, letterSpacing: "0.1em",
+              color: T.muted, textTransform: "uppercase", marginBottom: 10,
+            }}>
+              Citlivost: měsíční dopad podle růstu konverze
+            </div>
+            {calc.sensitivity.map((s) => {
+              const w = Math.abs(s.monthly) / maxAbs * 100;
+              const pos = s.monthly >= 0;
+              return (
+                <div key={s.uplift} style={{
+                  display: "flex", alignItems: "center", gap: 10, marginBottom: 6,
+                }}>
+                  <span style={{
+                    fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
+                    color: s.uplift === uplift ? T.amber : T.dim, width: 44, textAlign: "right",
+                  }}>+{s.uplift} %</span>
+                  <div style={{ flex: 1, height: 14, background: T.panelSoft, borderRadius: 2 }}>
+                    <div style={{
+                      width: `${w}%`, height: "100%", borderRadius: 2,
+                      background: pos ? T.green : T.red, opacity: 0.85,
+                    }} />
+                  </div>
+                  <span style={{
+                    fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
+                    color: pos ? T.green : T.red, width: 92, textAlign: "right",
+                    fontVariantNumeric: "tabular-nums",
+                  }}>{fmtKc(s.monthly)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+
+        {/* ===== SHRNUTÍ PRO KLIENTA ===== */}
+        <button onClick={() => setShowSummary(true)} style={{
+          width: "100%", padding: "13px", borderRadius: 4, cursor: "pointer",
+          background: "transparent", border: `1px solid ${T.amber}`, color: T.amber,
+          fontFamily: "'Archivo', sans-serif", fontWeight: 700, fontSize: 13,
+          letterSpacing: "0.1em", marginBottom: 14,
+        }}>
+          SHRNUTÍ PRO KLIENTA →
+        </button>
+
+        {/* ===== F4 PŘEDPOKLADY ===== */}
+        <Section code="F4" title="Předpoklady a jejich úprava" defaultOpen={false}>
+          <div style={{ display: "grid", gap: 16 }}>
+            <Field label="Cena za zásilku do AlzaBoxu" unit="Kč" value={cAbx} onChange={setCAbx} />
+            <Field label="Úspora na zpracování (jednodušší balení)" unit="Kč" value={procSave} onChange={setProcSave} />
+          </div>
+          <ul style={{ margin: "14px 0 0", padding: "0 0 0 18px" }}>
+            {[
+              "Marže z nové objednávky = AOV × hrubá marže (příspěvková marže; dopravu u nových objednávek hradí zákazník v ceně).",
+              "Nezapočítáváme sekundární efekty (nižší podíl nedoručených zásilek, méně vratek přes kurýra) — verdikt je tedy záměrně přísnější.",
+            ].map((a, i) => (
+              <li key={i} style={{
+                fontSize: 11.5, lineHeight: 1.6, color: T.muted, marginBottom: 8,
+              }}>{a}</li>
+            ))}
+          </ul>
+        </Section>
+
+        <BoxMap />
+
+      </main>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
